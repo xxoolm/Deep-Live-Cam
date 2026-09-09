@@ -58,7 +58,7 @@ def parse_args() -> None:
     program.add_argument('--live-resizable', help='The live camera frame is resizable', dest='live_resizable', action='store_true', default=False)
     program.add_argument('--max-memory', help='maximum amount of RAM in GB', dest='max_memory', type=int, default=suggest_max_memory())
     program.add_argument('--execution-provider', help='execution provider', dest='execution_provider', default=[suggest_default_execution_provider()], choices=suggest_execution_providers(), nargs='+')
-    program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int, default=suggest_execution_threads())
+    program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int, default=None)
     program.add_argument('-v', '--version', action='version', version=f'{modules.metadata.name} {modules.metadata.version}')
 
     # register deprecated args
@@ -89,6 +89,12 @@ def parse_args() -> None:
     modules.globals.execution_providers = decode_execution_providers(args.execution_provider)
     modules.globals.execution_threads = args.execution_threads
     modules.globals.lang = args.lang
+
+    # The argparse default (None) avoids evaluating suggest_execution_threads()
+    # before providers are decoded, and deprecated-arg overrides above may
+    # have already set execution_threads.
+    if modules.globals.execution_threads is None:
+        modules.globals.execution_threads = suggest_execution_threads()
 
     #for ENHANCER tumblers:
     for enhancer_key in ('face_enhancer', 'face_enhancer_gpen256', 'face_enhancer_gpen512'):
@@ -132,9 +138,9 @@ def suggest_max_memory() -> int:
 
 
 def suggest_default_execution_provider() -> str:
-    """Pick the best available provider: cuda > rocm > coreml > dml > cpu."""
+    """Pick the best available provider: cuda > rocm > coreml > openvino > dml > cpu."""
     available = encode_execution_providers(onnxruntime.get_available_providers())
-    for pref in ('cuda', 'rocm', 'coreml', 'dml'):
+    for pref in ('cuda', 'rocm', 'coreml', 'openvino', 'dml'):
         if pref in available:
             return pref
     return 'cpu'
@@ -157,6 +163,8 @@ def suggest_execution_threads() -> int:
         return 1
     if 'CUDAExecutionProvider' in modules.globals.execution_providers:
         return 2
+    if 'OpenVINOExecutionProvider' in modules.globals.execution_providers:
+        return 1
     
     # For CPU execution, use most cores but leave some for system
     return max(4, min(cpu_count - 2, 16))
@@ -170,6 +178,10 @@ def limit_resources() -> None:
             tensorflow.config.experimental.set_memory_growth(gpu, True)
     # limit memory usage
     if modules.globals.max_memory:
+        # setrlimit(RLIMIT_DATA) fails with EINVAL on macOS, crashing on launch.
+        # See https://github.com/hacksider/Deep-Live-Cam/issues/1848
+        if platform.system().lower() == 'darwin':
+            return
         memory = modules.globals.max_memory * 1024 ** 3
         if platform.system().lower() == 'windows':
             import ctypes
@@ -268,10 +280,9 @@ def start() -> None:
             update_status('Falling back to disk-based processing...')
 
         extraction_start = time.time()
-        if not modules.globals.map_faces:
-            create_temp(modules.globals.target_path)
-            update_status('Extracting frames...')
-            extract_frames(modules.globals.target_path)
+        create_temp(modules.globals.target_path)
+        update_status('Extracting frames...')
+        extract_frames(modules.globals.target_path)
         extraction_time = time.time() - extraction_start
 
         temp_frame_paths = get_temp_frame_paths(modules.globals.target_path)
@@ -322,7 +333,8 @@ def start() -> None:
 def destroy(to_quit=True) -> None:
     if modules.globals.target_path:
         clean_temp(modules.globals.target_path)
-    if to_quit: quit()
+    if to_quit:
+        quit()
 
 
 def run() -> None:

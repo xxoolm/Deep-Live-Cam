@@ -4,9 +4,8 @@ from typing import Any
 import insightface
 import threading
 
-import cv2
-import numpy as np
 import modules.globals
+from modules import imread_unicode, imwrite_unicode
 from tqdm import tqdm
 from modules.typing import Frame
 from modules.cluster_analysis import find_cluster_centroids, find_closest_centroid
@@ -30,6 +29,9 @@ def get_face_analyser() -> Any:
                 from modules.processors.frame._onnx_enhancer import (
                     build_provider_config,
                 )
+                from modules.model_downloader import ensure_insightface_pack
+
+                ensure_insightface_pack('buffalo_l')
                 providers = build_provider_config()
                 FACE_ANALYSER = insightface.app.FaceAnalysis(
                     name='buffalo_l',
@@ -255,7 +257,7 @@ def add_blank_map() -> Any:
 def get_unique_faces_from_target_image() -> Any:
     try:
         modules.globals.source_target_map = []
-        target_frame = cv2.imread(modules.globals.target_path)
+        target_frame = imread_unicode(modules.globals.target_path)
         many_faces = get_many_faces(target_frame)
         if many_faces is None:
             return None
@@ -291,7 +293,7 @@ def get_unique_faces_from_target_video() -> Any:
 
         i = 0
         for temp_frame_path in tqdm(temp_frame_paths, desc="Extracting face embeddings from frames"):
-            temp_frame = cv2.imread(temp_frame_path)
+            temp_frame = imread_unicode(temp_frame_path)
             many_faces = get_many_faces(temp_frame)
             if many_faces is None:
                 continue
@@ -336,6 +338,9 @@ def default_target_face():
                 best_frame = frame
                 break
 
+        if best_face is None:
+            continue  # No faces detected in this cluster — skip
+
         for frame in map['target_faces_in_frame']:
             for face in frame['faces']:
                 if face['det_score'] > best_face['det_score']:
@@ -344,7 +349,7 @@ def default_target_face():
 
         x_min, y_min, x_max, y_max = best_face['bbox']
 
-        target_frame = cv2.imread(best_frame['location'])
+        target_frame = imread_unicode(best_frame['location'])
         map['target'] = {
                         'cv2' : target_frame[int(y_min):int(y_max), int(x_min):int(x_max)],
                         'face' : best_face
@@ -360,7 +365,7 @@ def dump_faces(centroids: Any, frame_face_embeddings: list):
         Path(temp_directory_path + f"/{i}").mkdir(parents=True, exist_ok=True)
 
         for frame in tqdm(frame_face_embeddings, desc=f"Copying faces to temp/./{i}"):
-            temp_frame = cv2.imread(frame['location'])
+            temp_frame = imread_unicode(frame['location'])
 
             j = 0
             for face in frame['faces']:
@@ -368,5 +373,5 @@ def dump_faces(centroids: Any, frame_face_embeddings: list):
                     x_min, y_min, x_max, y_max = face['bbox']
 
                     if temp_frame[int(y_min):int(y_max), int(x_min):int(x_max)].size > 0:
-                        cv2.imwrite(temp_directory_path + f"/{i}/{frame['frame']}_{j}.png", temp_frame[int(y_min):int(y_max), int(x_min):int(x_max)])
+                        imwrite_unicode(temp_directory_path + f"/{i}/{frame['frame']}_{j}.png", temp_frame[int(y_min):int(y_max), int(x_min):int(x_max)])
                 j += 1

@@ -73,6 +73,7 @@ from modules.utilities import (
     is_image,
     is_video,
 )
+from modules import imread_unicode
 from modules.video_capture import VideoCapturer
 
 if platform.system() == "Windows":
@@ -235,6 +236,18 @@ def _(text: str) -> str:
 _RECENT_SOURCE_DIR: Optional[str] = None
 _RECENT_TARGET_DIR: Optional[str] = None
 _RECENT_OUTPUT_DIR: Optional[str] = None
+
+# QFileDialog filter strings, built from the canonical extension sets in
+# globals so every dialog stays in sync (no hand-copied lists to drift).
+_IMAGE_FILE_FILTER = "Images (" + " ".join(
+    f"*{ext}" for ext in modules.globals.IMAGE_EXTENSIONS
+) + ")"
+_MEDIA_FILE_FILTER = "Media (" + " ".join(
+    f"*{ext}" for ext in (*modules.globals.IMAGE_EXTENSIONS, *modules.globals.VIDEO_EXTENSIONS)
+) + ")"
+_VIDEO_FILE_FILTER = "Videos (" + " ".join(
+    f"*{ext}" for ext in modules.globals.VIDEO_EXTENSIONS
+) + ")"
 
 
 # ─── image utilities ─────────────────────────────────────────────────────
@@ -416,7 +429,7 @@ def get_available_cameras() -> Tuple[List[int], List[str]]:
     indices: List[int] = []
     names: List[str] = []
     for i in range(10):
-        cap = cv2.VideoCapture(i)
+        cap = cv2.VideoCapture(f"/dev/video{i}")
         if cap.isOpened():
             indices.append(i)
             names.append(f"Camera {i}")
@@ -733,7 +746,7 @@ class MainWindow(QMainWindow):
         path, _filter = QFileDialog.getOpenFileName(
             self, _("select an source image"),
             _RECENT_SOURCE_DIR or "",
-            "Images (*.png *.jpg *.jpeg *.gif *.bmp)",
+            _IMAGE_FILE_FILTER,
         )
         if path and is_image(path):
             modules.globals.source_path = path
@@ -754,7 +767,7 @@ class MainWindow(QMainWindow):
         path, _filter = QFileDialog.getOpenFileName(
             self, _("select an target image or video"),
             _RECENT_TARGET_DIR or "",
-            "Media (*.png *.jpg *.jpeg *.gif *.bmp *.mp4 *.mkv)",
+            _MEDIA_FILE_FILTER,
         )
         if not path:
             return
@@ -885,13 +898,13 @@ class MainWindow(QMainWindow):
             path, _f = QFileDialog.getSaveFileName(
                 self, _("save image output file"),
                 os.path.join(_RECENT_OUTPUT_DIR or "", "output.png"),
-                "Images (*.png *.jpg *.jpeg *.bmp)",
+                _IMAGE_FILE_FILTER,
             )
         elif is_video(modules.globals.target_path):
             path, _f = QFileDialog.getSaveFileName(
                 self, _("save video output file"),
                 os.path.join(_RECENT_OUTPUT_DIR or "", "output.mp4"),
-                "Videos (*.mp4 *.mkv)",
+                _VIDEO_FILE_FILTER,
             )
         else:
             return
@@ -988,7 +1001,7 @@ class PreviewWindow(QWidget):
         from modules.processors.frame.core import get_frame_processors_modules as _gfpm
         for fp in _gfpm(modules.globals.frame_processors):
             temp_frame = fp.process_frame(
-                get_one_face(cv2.imread(modules.globals.source_path)), temp_frame
+                get_one_face(imread_unicode(modules.globals.source_path)), temp_frame
             )
         # Fit to current widget size while preserving aspect ratio.
         h, w = temp_frame.shape[:2]
@@ -1071,7 +1084,7 @@ class _ProcessingWorker(QThread):
                     and modules.globals.source_path != last_source_path
                 ):
                     last_source_path = modules.globals.source_path
-                    source_image = get_one_face(cv2.imread(modules.globals.source_path))
+                    source_image = get_one_face(imread_unicode(modules.globals.source_path))
 
                 det_count += 1
                 if det_count % det_interval == 0:
@@ -1333,11 +1346,11 @@ class MapperDialog(QDialog):
         path, _f = QFileDialog.getOpenFileName(
             self, _("select an source image"),
             _RECENT_SOURCE_DIR or "",
-            "Images (*.png *.jpg *.jpeg *.gif *.bmp)",
+            _IMAGE_FILE_FILTER,
         )
         if not path:
             return
-        cv2_img = cv2.imread(path)
+        cv2_img = imread_unicode(path)
         face = get_one_face(cv2_img)
         if face is None:
             self.set_status("Face could not be detected in last upload!")
@@ -1438,11 +1451,11 @@ class LiveMapperDialog(QDialog):
         path, _f = QFileDialog.getOpenFileName(
             self, _("select an source image"),
             _RECENT_SOURCE_DIR or "",
-            "Images (*.png *.jpg *.jpeg *.gif *.bmp)",
+            _IMAGE_FILE_FILTER,
         )
         if not path:
             return
-        cv2_img = cv2.imread(path)
+        cv2_img = imread_unicode(path)
         face = get_one_face(cv2_img)
         if face is None:
             self.set_status("Face could not be detected in last upload!")

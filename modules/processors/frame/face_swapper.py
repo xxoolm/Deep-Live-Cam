@@ -7,16 +7,17 @@ import numpy as np
 import platform
 import modules.globals
 import modules.processors.frame.core
+from modules import imread_unicode, imwrite_unicode
 from modules.core import update_status
 from modules.face_analyser import get_one_face, get_many_faces, default_source_face
 from modules.typing import Face, Frame
 from modules.utilities import (
-    conditional_download,
     is_image,
     is_video,
 )
 from modules.cluster_analysis import find_closest_centroid
-from modules.gpu_processing import gpu_gaussian_blur, gpu_sharpen, gpu_add_weighted, gpu_resize, gpu_cvt_color
+from modules.gpu_processing import gpu_gaussian_blur, gpu_sharpen, gpu_add_weighted, gpu_resize
+from modules.platform_info import OPENVINO_PROVIDER_CONFIG
 import os
 from collections import deque
 import time
@@ -190,21 +191,26 @@ models_dir = os.path.join(
 def pre_check() -> bool:
     # Use models_dir instead of abs_dir to save to the correct location
     download_directory_path = models_dir
-    
+
     # Make sure the models directory exists, catch permission errors if they occur
     try:
         os.makedirs(download_directory_path, exist_ok=True)
     except OSError as e:
         logging.error(f"Failed to create directory {download_directory_path} due to permission error: {e}")
         return False
-    
-    # Use the direct download URL from Hugging Face (FP32 model for broad GPU compatibility)
-    conditional_download(
-        download_directory_path,
-        [
-            "https://huggingface.co/hacksider/deep-live-cam/resolve/main/inswapper_128.onnx"
-        ],
-    )
+
+    from modules.model_downloader import ensure_any
+
+    variants = ["inswapper_128.onnx", "inswapper_128_fp16.onnx"]
+    if _HAS_TORCH_CUDA:
+        variants.reverse()
+    if ensure_any(variants) is None:
+        update_status(
+            "Could not obtain the inswapper model. Place inswapper_128.onnx in "
+            "the models folder manually or check your internet connection.",
+            NAME,
+        )
+        return False
     return True
 
 
@@ -240,8 +246,12 @@ def get_face_swapper() -> Any:
             elif os.path.exists(fp32_path):
                 model_path = fp32_path
             else:
-                update_status(f"No inswapper model found in {models_dir}.", NAME)
-                return None
+                if not pre_check():
+                    return None
+                model_path = fp16_path if os.path.exists(fp16_path) else fp32_path
+                if not os.path.exists(model_path):
+                    update_status(f"No inswapper model found in {models_dir}.", NAME)
+                    return None
             # On Apple Silicon, rewrite Pad(reflect) → Slice+Concat so
             # CoreML can run the entire model in a single partition on
             # the Neural Engine instead of bouncing between CPU and ANE.
@@ -269,6 +279,8 @@ def get_face_swapper() -> Any:
                         # Use bare provider — ONNX Runtime defaults are
                         # fastest on modern GPUs (Blackwell/sm_120).
                         providers_config.append(p)
+                    elif p == "OpenVINOExecutionProvider":
+                        providers_config.append(OPENVINO_PROVIDER_CONFIG)
                     else:
                         providers_config.append(p)
                 FACE_SWAPPER = insightface.model_zoo.get_model(
@@ -680,7 +692,8 @@ def apply_post_processing(current_frame: Frame, swapped_face_bboxes: List[np.nda
                 continue
 
             face_region = processed_frame[y1:y2, x1:x2]
-            if face_region.size == 0: continue
+            if face_region.size == 0:
+                continue
 
             # Apply sharpening (GPU-accelerated when CUDA OpenCV is available)
             try:
@@ -815,9 +828,11 @@ def process_frame_v2(temp_frame: Frame, temp_frame_path: str = "") -> Frame:
             else: # Single face or specific mapping
                  for map_data in source_target_map:
                     source_info = map_data.get("source", {})
-                    if not source_info: continue # Skip if no source info
+                    if not source_info:
+                        continue # Skip if no source info
                     source_face = source_info.get("face")
-                    if not source_face: continue # Skip if no source defined for this map entry
+                    if not source_face:
+                        continue # Skip if no source defined for this map entry
 
                     if is_image(modules.globals.target_path):
                         target_info = map_data.get("target", {})
@@ -854,7 +869,8 @@ def process_frame_v2(temp_frame: Frame, temp_frame_path: str = "") -> Frame:
                      if len(detected_faces) <= len(target_embeddings):
                           # More targets defined than detected - match each detected face
                           for detected_face in detected_faces:
-                              if detected_face.normed_embedding is None: continue
+                              if detected_face.normed_embedding is None:
+                                  continue
                               closest_idx, _ = find_closest_centroid(target_embeddings, detected_face.normed_embedding)
                               if 0 <= closest_idx < len(source_faces):
                                   source_target_pairs.append((source_faces[closest_idx], detected_face))
@@ -862,7 +878,8 @@ def process_frame_v2(temp_frame: Frame, temp_frame_path: str = "") -> Frame:
                           # More faces detected than targets defined - match each target embedding to closest detected face
                           detected_embeddings = [f.normed_embedding for f in detected_faces if f.normed_embedding is not None]
                           detected_faces_with_embedding = [f for f in detected_faces if f.normed_embedding is not None]
-                          if not detected_embeddings: return processed_frame # No embeddings to match
+                          if not detected_embeddings:
+                              return processed_frame # No embeddings to match
 
                           for i, target_embedding in enumerate(target_embeddings):
                               if 0 <= i < len(source_faces): # Ensure source face exists for this embedding
@@ -912,7 +929,7 @@ def process_frames(
             # Log the error but allow proceeding; subsequent check will stop processing.
         else:
             try:
-                source_img = cv2.imread(source_path)
+                source_img = imread_unicode(source_path)
                 if source_img is None:
                     # Specific error for file reading failure
                     update_status(f"Error reading source image file {source_path}. Please check the path and file integrity.", NAME)
@@ -936,7 +953,7 @@ def process_frames(
 
     # --- Stop processing entirely if in Simple Mode and source face is invalid ---
     if not use_v2 and source_face is None:
-        update_status(f"Halting video processing: Invalid or no face detected in source image for simple mode.", NAME)
+        update_status("Halting video processing: Invalid or no face detected in source image for simple mode.", NAME)
         if progress:
             # Ensure the progress bar completes if it was started
             remaining_updates = total_frames - progress.n if hasattr(progress, 'n') else total_frames
@@ -952,14 +969,16 @@ def process_frames(
         # Read the target frame
         temp_frame = None
         try:
-            temp_frame = cv2.imread(temp_frame_path)
+            temp_frame = imread_unicode(temp_frame_path)
             if temp_frame is None:
                 print(f"{NAME}: Error: Could not read frame: {temp_frame_path}, skipping.")
-                if progress: progress.update(1)
+                if progress:
+                    progress.update(1)
                 continue # Skip this frame if read fails
         except Exception as read_e:
             print(f"{NAME}: Error reading frame {temp_frame_path}: {read_e}, skipping.")
-            if progress: progress.update(1)
+            if progress:
+                progress.update(1)
             continue
 
         # Select processing function and execute
@@ -988,7 +1007,7 @@ def process_frames(
         # Write the result back to the same frame path with optimized compression
         try:
             # Use PNG compression level 3 (faster) instead of default 9
-            write_success = cv2.imwrite(temp_frame_path, result_frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+            write_success = imwrite_unicode(temp_frame_path, result_frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             if not write_success:
                 print(f"{NAME}: Error: Failed to write processed frame to {temp_frame_path}")
         except Exception as write_e:
@@ -1018,7 +1037,7 @@ def process_image(source_path: str, target_path: str, output_path: str) -> None:
 
     # Read target first
     try:
-        target_frame = cv2.imread(target_path)
+        target_frame = imread_unicode(target_path)
         if target_frame is None:
             update_status(f"Error: Could not read target image: {target_path}", NAME)
             return
@@ -1037,7 +1056,7 @@ def process_image(source_path: str, target_path: str, output_path: str) -> None:
 
         else: # Simple mode
             try:
-                source_img = cv2.imread(source_path)
+                source_img = imread_unicode(source_path)
                 if source_img is None:
                     update_status(f"Error: Could not read source image: {source_path}", NAME)
                     return
@@ -1053,7 +1072,7 @@ def process_image(source_path: str, target_path: str, output_path: str) -> None:
 
         # Write the result if processing was successful
         if result is not None:
-            write_success = cv2.imwrite(output_path, result)
+            write_success = imwrite_unicode(output_path, result)
             if write_success:
                 update_status(f"Output image saved to: {output_path}", NAME)
             else:
@@ -1496,7 +1515,8 @@ def apply_color_transfer(source, target):
             if len(source.shape) == 2: # Grayscale
                 source = cv2.cvtColor(source, cv2.COLOR_GRAY2BGR)
             source = np.clip(source, 0, 255).astype(np.uint8)
-            if len(source.shape)!= 3 or source.shape[2]!= 3: raise ValueError("Conversion failed")
+            if len(source.shape) != 3 or source.shape[2] != 3:
+                raise ValueError("Conversion failed")
         except Exception:
             return source
     if len(target.shape) != 3 or target.shape[2] != 3 or target.dtype != np.uint8:
@@ -1505,7 +1525,8 @@ def apply_color_transfer(source, target):
             if len(target.shape) == 2: # Grayscale
                 target = cv2.cvtColor(target, cv2.COLOR_GRAY2BGR)
             target = np.clip(target, 0, 255).astype(np.uint8)
-            if len(target.shape)!= 3 or target.shape[2]!= 3: raise ValueError("Conversion failed")
+            if len(target.shape) != 3 or target.shape[2] != 3:
+                raise ValueError("Conversion failed")
         except Exception:
              return source # Return original source if target invalid
 
